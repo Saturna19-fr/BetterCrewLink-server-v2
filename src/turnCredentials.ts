@@ -20,6 +20,8 @@ const RETRY_BASE_MS = 30000;
 const RETRY_MAX_MS = 600000;
 /** Guard against a misconfigured tiny TTL turning into an API hammer. */
 const MIN_TTL_SECONDS = 600;
+/** Cloudflare rejects any TTL above 48h; exceeding it would silently drop us to STUN. */
+const MAX_TTL_SECONDS = 172800;
 
 interface Logger {
 	info: (...args: any[]) => void;
@@ -46,6 +48,19 @@ export interface TurnCredentialProvider {
 }
 
 /**
+ * Chrome and Firefox block port 53 and those candidates fail silently, so Cloudflare
+ * recommends filtering them server-side. Match the port exactly: their own sample uses
+ * `url.includes(':53')`, which also strips `:5349` -- TURN over TLS, the URL that gets
+ * players through restrictive corporate firewalls.
+ */
+function stripPort53(urls: string | string[]): string | string[] {
+	if (!Array.isArray(urls)) return urls;
+	const kept = urls.filter((url) => !/:53(\?|$)/.test(url));
+	// Never hand back an empty list if the shape was unexpected.
+	return kept.length > 0 ? kept : urls;
+}
+
+/**
  * Parses the API response. Kept as a single function so that a change to
  * Cloudflare's response shape is a one-place fix.
  *
@@ -62,7 +77,7 @@ export function parseIceServers(raw: string): ICEServer[] {
 	const servers: ICEServer[] = [];
 	for (const entry of list) {
 		if (!entry || !entry.urls) continue;
-		const server: ICEServer = { urls: entry.urls };
+		const server: ICEServer = { urls: stripPort53(entry.urls) };
 		if (typeof entry.username === 'string') server.username = entry.username;
 		if (typeof entry.credential === 'string') server.credential = entry.credential;
 		servers.push(server);
@@ -119,7 +134,10 @@ export function createTurnCredentialProvider(logger: Logger): TurnCredentialProv
 	const keyId = process.env.CF_TURN_KEY_ID;
 	const apiToken = process.env.CF_TURN_API_TOKEN;
 	const configured = !!keyId && !!apiToken;
-	const ttlSeconds = Math.max(MIN_TTL_SECONDS, Number(process.env.CF_TURN_TTL_SECONDS) || 86400);
+	const ttlSeconds = Math.min(
+		MAX_TTL_SECONDS,
+		Math.max(MIN_TTL_SECONDS, Number(process.env.CF_TURN_TTL_SECONDS) || 86400)
+	);
 
 	let iceServers: ICEServer[] = [];
 	let expiresAt = 0;

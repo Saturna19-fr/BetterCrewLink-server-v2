@@ -87,8 +87,9 @@ Set these and leave `integratedRelay.enabled` at `false`:
  - `CF_TURN_KEY_ID`: Cloudflare Realtime TURN key ID.
  - `CF_TURN_API_TOKEN`: API token for that key. **This is a secret** -- put it in the environment,
    never in `config/peerConfig.yml`, and keep it out of git.
- - `CF_TURN_TTL_SECONDS`: Credential lifetime, default `86400` (24h), minimum `600`. Credentials are
-   refreshed automatically at half-life.
+ - `CF_TURN_TTL_SECONDS`: Credential lifetime, default `86400` (24h). Clamped to Cloudflare's accepted
+   range: minimum `600`, maximum `172800` (48h, above which the API rejects the request). Credentials
+   are refreshed automatically at half-life.
 
 Create a key at Cloudflare dashboard -> Realtime -> TURN. If these are unset the server behaves
 exactly as before and clients get STUN only. If the API is unreachable the server keeps running and
