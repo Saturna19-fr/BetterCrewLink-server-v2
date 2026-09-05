@@ -50,13 +50,30 @@ This is the relay server for CrewLink, an Among Us proximity voice chat program.
 
 ## Environment Variables
 
-Optional environment variables:
+All of these are optional; the server starts with sensible defaults.
 
  - `PORT`: Specifies the port that the server runs on. Defaults to `443` if `HTTPS` is enabled, and `9736` if not.
- - `HOSTNAME`: The hostname or IP of the server (a record without a proxy so if you have cloudflare make a extra dns record named for example direct.domain.com and disable the proxy for that record (this is for the turn server)
- - `NAME`: Specifies the server name
- - `HTTPS`: Enables https. You must place `privkey.pem` and `fullchain.pem` in your CWD.
- - `SSLPATH`: Specifies an alternate path to SSL certificates.
+ - `NAME`: Specifies the server name, shown on the index page and in `GET /health`.
+ - `HTTPS`: Makes the server terminate TLS itself. You must place `privkey.pem` and `fullchain.pem` in your CWD.
+   **Leave this unset if you run behind a reverse proxy** (Traefik, nginx, Caddy, Cloudflare Tunnel): the proxy
+   terminates TLS and the server should speak plain HTTP on `PORT`. Setting it there makes the server fail to
+   start looking for certificates it does not have.
+ - `SSLPATH`: Specifies an alternate path to SSL certificates. Only read when `HTTPS` is set.
+ - `HOSTNAME`: Public hostname or IP advertised to clients, **used only by the integrated TURN relay**. It has
+   to resolve straight to the server, so with Cloudflare you need a separate DNS record (for example
+   `direct.domain.com`) with the proxy disabled. Ignored entirely unless `integratedRelay.enabled` is `true`.
+   **In a container, be careful:** Docker sets `HOSTNAME` automatically to the container ID, so the startup
+   check that is supposed to stop you enabling the relay without a real hostname can never fire. The relay
+   starts anyway and advertises an unroutable address, which fails silently. Set it explicitly, or use a
+   managed TURN service (below).
+ - `FORCE_RELAY_ONLY`: Route every connection through TURN instead of letting players connect directly.
+   Overrides `forceRelayOnly` in `config/peerConfig.yml`, which container deployments cannot easily mount.
+   Two uses: set it temporarily to confirm your relay works for everyone without waiting for a player with a
+   restrictive NAT, or leave it on so players never learn each other's IP addresses. Costs relay bandwidth
+   and adds a hop of latency. Accepts `true`/`false` (also `1`/`0`, `yes`/`no`, `on`/`off`); a blank or
+   unrecognised value is ignored rather than treated as `false`.
+ - `LOBBY_TTL_MINUTES`: Grace period, default `15`, before an *orphaned* public lobby (one whose room is
+   already empty) is dropped from the lobby browser. A lobby that still has players in it is never evicted.
 
 ### Managed TURN (recommended)
 
@@ -72,13 +89,6 @@ Set these and leave `integratedRelay.enabled` at `false`:
    never in `config/peerConfig.yml`, and keep it out of git.
  - `CF_TURN_TTL_SECONDS`: Credential lifetime, default `86400` (24h), minimum `600`. Credentials are
    refreshed automatically at half-life.
- - `FORCE_RELAY_ONLY`: Route every connection through TURN instead of letting players connect
-   directly. Overrides `forceRelayOnly` in `config/peerConfig.yml`, which container deployments
-   cannot easily mount. Two uses: set it temporarily to confirm your relay works for everyone,
-   or leave it on so players never learn each other's IP addresses. Costs relay bandwidth and
-   adds a hop of latency.
- - `LOBBY_TTL_MINUTES`: Grace period, default `15`, before an *orphaned* public lobby is dropped
-   from the browser. A lobby that still has players in it is never evicted on this timer.
 
 Create a key at Cloudflare dashboard -> Realtime -> TURN. If these are unset the server behaves
 exactly as before and clients get STUN only. If the API is unreachable the server keeps running and
