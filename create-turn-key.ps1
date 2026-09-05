@@ -75,7 +75,15 @@ if (-not $resp.success) {
 }
 
 $uid = $resp.result.uid
-$key = $resp.result.key
+# The live API returns this as 'secret'. Both the Cloudflare API reference and the
+# cloudflare/skills plugin document it as 'key', so accept either.
+$key = $resp.result.secret
+if (-not $key) { $key = $resp.result.key }
+if (-not $key) {
+    Write-Host 'Key created, but no secret field in the response. Raw result:' -ForegroundColor Red
+    $resp.result | ConvertTo-Json -Depth 5
+    exit 1
+}
 
 Write-Host ''
 Write-Host 'Done. Paste these into Coolify:' -ForegroundColor Green
