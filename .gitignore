@@ -6,3 +6,5 @@ config/*
 .env.*
 !.env.example
 .idea/
+webclient/
+web/.build/

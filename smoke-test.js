@@ -1,7 +1,10 @@
 /* Temporary smoke test: verifies the wire protocol still works and the fixes fire. */
 const { fork } = require('child_process');
 const http = require('http');
-const ioClient = require('socket.io-client');
+const { io: ioClient } = require('socket.io-client');
+// Desktop BetterCrewLink is pinned to socket.io-client 2.4.0. Driving a real one is
+// the only way to prove allowEIO3 still carries it; a v4 client cannot fake EIO=3.
+const ioClientV2 = require('socket.io-client-v2');
 
 const PORT = 19736;
 const URL = `http://127.0.0.1:${PORT}`;
@@ -34,6 +37,22 @@ function connect() {
 	s.peerConfig = new Promise((r) => s.once('clientPeerConfig', r));
 	return new Promise((resolve) => s.on('connect', () => resolve(s)));
 }
+/** Same as connect(), but with the desktop client's generation (EIO=3). */
+function connectV2() {
+	// Default transports on purpose: this exercises the polling handshake and the
+	// websocket upgrade, which is the path desktop clients actually take.
+	const s = ioClientV2(URL, { forceNew: true });
+	s.peerConfig = new Promise((r) => s.once('clientPeerConfig', r));
+	return new Promise((resolve) => s.on('connect', () => resolve(s)));
+}
+function headers(path, hdrs) {
+	return new Promise((resolve) => {
+		http.get(URL + path, { headers: hdrs }, (res) => {
+			res.resume();
+			resolve(res.headers);
+		}).on('error', () => resolve({}));
+	});
+}
 function once(sock, ev, ms = 1500) {
 	return new Promise((resolve) => {
 		const t = setTimeout(() => resolve(undefined), ms);
@@ -44,7 +63,14 @@ function once(sock, ev, ms = 1500) {
 	});
 }
 
-const server = fork('dist/index.js', [], { env: { ...process.env, PORT: String(PORT), NODE_ENV: 'production' }, stdio: 'inherit' });
+// The INERT checks below need a server with no TURN provider. Blanking the vars
+// explicitly is what makes that true on a developer machine: the server calls
+// dotenv.config(), which would otherwise load real credentials out of .env --
+// dotenv never overrides a variable that is already set, even to an empty string.
+const server = fork('dist/index.js', [], {
+	env: { ...process.env, PORT: String(PORT), NODE_ENV: 'production', CF_TURN_KEY_ID: '', CF_TURN_API_TOKEN: '' },
+	stdio: 'inherit',
+});
 
 (async () => {
 	check('server became ready', await waitForServer());
@@ -202,6 +228,81 @@ const server = fork('dist/index.js', [], { env: { ...process.env, PORT: String(P
 	check('DEGRADED credential is never exposed on /health',
 		!!h2b && !JSON.stringify(h2b).includes('bogus-api-token'));
 	server2.kill('SIGKILL');
+
+	// --- protocol compatibility: both client generations, one server ---
+	// The web/mobile client is socket.io-client 4.x (EIO=4), desktop BetterCrewLink is
+	// 2.4.0 (EIO=3). A server speaking only one leaves the other spinning on
+	// "connecting to voice server" with nothing in its logs, so assert both.
+	const v2 = await connectV2();
+	check('EIO=3 client connects', v2.connected);
+	await wait(400);
+	check('EIO=3 client upgrades to websocket', v2.io.engine.transport.name === 'websocket',
+		v2.io.engine.transport.name);
+	check('EIO=3 client receives clientPeerConfig', !!(await v2.peerConfig));
+
+	const hp = await get('/health');
+	check('health splits live connections by protocol',
+		!!hp && hp.protocols.eio3 === 1 && hp.protocols.eio4 > 0,
+		hp ? JSON.stringify(hp.protocols) : 'no response');
+
+	// v2 sent these by default via origins:'*:*'; v4 only sends them because of the
+	// explicit cors option, and losing them breaks every browser client silently.
+	const cors = await headers('/socket.io/?EIO=4&transport=polling', { Origin: 'https://example.com' });
+	check('CORS reflects the browser origin',
+		cors['access-control-allow-origin'] === 'https://example.com' &&
+			cors['access-control-allow-credentials'] === 'true',
+		JSON.stringify(cors['access-control-allow-origin']));
+
+	const v4 = await connect();
+	v2.emit('join', 'XPROTO', 1, 101);
+	v2.emit('id', 1, 101);
+	await wait(150);
+	const joinSeen = once(v2, 'join');
+	v4.emit('join', 'XPROTO', 2, 202);
+	v4.emit('id', 2, 202);
+	const joined = await joinSeen;
+	// Peer signalling only works because an EIO3 socket's server-side id is the
+	// engine.io id the v2 client knows itself by. If that ever drifts, every peer
+	// connection breaks while the lobby still looks healthy.
+	check('socket id agrees across the protocol boundary',
+		Array.isArray(joined) && joined[0] === v4.id, JSON.stringify(joined));
+
+	const sigToV2 = once(v2, 'signal');
+	v4.emit('signal', { to: v2.id, data: { hello: 'v4' } });
+	const gotV2 = await sigToV2;
+	check('signal relays v4 -> v2 with the right sender', !!gotV2 && gotV2.from === v4.id);
+
+	const sigToV4 = once(v4, 'signal');
+	v2.emit('signal', { to: v4.id, data: { hello: 'v2' } });
+	check('signal relays v2 -> v4', !!(await sigToV4));
+
+	// --- mobile pairing: <CODE> and <CODE>_mobile are halves of one lobby ---
+	const mobHost = await connect();
+	const phone = await connect();
+	mobHost.emit('join', 'MOBILE1_mobile', 3, 303);
+	phone.emit('join', 'MOBILE1_mobile', 4, 404);
+	await wait(150);
+	const hostHello = once(phone, 'signal');
+	mobHost.emit('signal', { to: phone.id, data: { mobileHostInfo: { isHostingMobile: true } } });
+	check('Mobile Host reaches the phone inside <CODE>_mobile', !!(await hostHello));
+
+	phone.emit('join', 'MOBILE1', 4, 404); // the phone moves to the voice room
+	await wait(200);
+	const gameState = once(phone, 'signal');
+	mobHost.emit('signal', { to: phone.id, data: { gameState: 1 } });
+	check('BUGFIX Mobile Host still reaches the phone once it joins <CODE>', !!(await gameState));
+
+	const browser3 = await connect();
+	browser3.emit('lobbybrowser', true);
+	const sneaky = await connect();
+	sneaky.emit('join', 'lobbybrowser_mobile', 5, 505);
+	await wait(150);
+	const leak = once(browser3, 'signal', 700);
+	sneaky.emit('signal', { to: browser3.id, data: { evil: true } });
+	check('SECURITY lobbybrowser_mobile does not pair into the reserved browser room', !(await leak));
+
+	for (const s of [v2, v4, mobHost, phone, browser3, sneaky]) s.close();
+	await wait(200);
 
 	// --- graceful shutdown on SIGTERM ---
 	for (const s of [a, b, br1, br2, evil]) s.close();

@@ -1,0 +1,30 @@
+diff --git a/src/app/services/settings.service.ts b/src/app/services/settings.service.ts
+index 079b70a..61b8ff8 100644
+--- a/src/app/services/settings.service.ts
++++ b/src/app/services/settings.service.ts
+@@ -5,8 +5,10 @@ import { Storage } from '@ionic/storage';
+ 
+ const DEFAULTSETTINGS: ISettings = {
+ 	gamecode: '',
+-	voiceServerOption: VoiceServerOption.BETTERCREWLINK,
+-	customVoiceServer: 'https://bettercrewl.ink',
++	// Self-hosted build: default to the server this page was served from, so a
++	// player only has to type a lobby code and a name.
++	voiceServerOption: VoiceServerOption.CUSTOM,
++	customVoiceServer: window.location.origin,
+ 	username: '',
+ 	selectedMicrophone: { id: 0, label: 'default', deviceId: 'default', kind: 'audioinput' },
+ 	natFix: false,
+@@ -56,9 +58,9 @@ export class SettingsService {
+ 			case VoiceServerOption.BETTERCREWLINK:
+ 				return 'https://bettercrewl.ink';
+ 			case VoiceServerOption.CUSTOM:
+-				return !this.IsMobile && this.settings.customVoiceServer.includes('//crewl.ink')
+-					? 'https://ubuntu1.guus.info'
+-					: this.settings.customVoiceServer;
++				// Upstream rewrites //crewl.ink to a server of its own here. A
++				// self-hosted build must never silently redirect players elsewhere.
++				return this.settings.customVoiceServer || window.location.origin;
+ 		}
+ 	}
+ 

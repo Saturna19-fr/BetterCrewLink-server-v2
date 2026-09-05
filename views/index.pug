@@ -17,6 +17,11 @@ h1 BetterCrewlink Server
 	b #{address}
 	p There #{connectionCount === 1 ? 'is' : 'are'} currently #{connectionCount} connected user#{connectionCount === 1 ? '' : 's'} 
 	<hr>
+	if hasWebClient
+		p
+			a(href="/app")
+				| To join from a phone or a browser 
+				| <b>Open the web client</b>
 	p
 		a(href="https://github.com/OhMyGuus/BetterCrewLink/releases/latest", target="_blank")
 			| To download BetterCrewLink

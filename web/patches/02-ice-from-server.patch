@@ -1,0 +1,51 @@
+diff --git a/src/app/services/ConnectionController.service.ts b/src/app/services/ConnectionController.service.ts
+index eef894a..5501b39 100644
+--- a/src/app/services/ConnectionController.service.ts
++++ b/src/app/services/ConnectionController.service.ts
+@@ -66,6 +66,14 @@ export class ConnectionController implements IConnectionController {
+ 	deviceID: string;
+ 	public lobbySettings: ILobbySettings = DEFAULT_LOBBYSETTINGS;
+ 	natFix = false;
++	/**
++	 * ICE configuration pushed by the signaling server on connect. A self-hosted
++	 * server issues its own (Cloudflare) TURN credentials, which is the whole point
++	 * of hosting one -- the constants in turnServers.ts point at somebody else's
++	 * relay with credentials frozen into the bundle. Stays undefined if the server
++	 * never sends one, in which case those constants are still the fallback.
++	 */
++	peerConfig: RTCConfiguration | undefined;
+ 	public audioController: AudioController;
+ 	public mobileHosts: Map<string, mobileHostInfo> = new Map<string, mobileHostInfo>();
+ 	private currentHost: string;
+@@ -204,7 +212,7 @@ export class ConnectionController implements IConnectionController {
+ 		const peer: Peer = new Peer({
+ 			stream,
+ 			initiator,
+-			config: this.natFix ? DEFAULT_ICE_CONFIG_TURN : DEFAULT_ICE_CONFIG,
++			config: this.peerConfig ?? (this.natFix ? DEFAULT_ICE_CONFIG_TURN : DEFAULT_ICE_CONFIG),
+ 			objectMode: true,
+ 		});
+ 		peer.on('connect', () => {
+@@ -348,6 +356,22 @@ export class ConnectionController implements IConnectionController {
+ 		this.socketIOClient.on('error', (error: string) => {
+ 			console.log('[client.error', error);
+ 		});
++
++		// Pushed immediately on connect, so it has to be registered here rather than
++		// inside the 'connect' handler or the very first one is missed.
++		this.socketIOClient.on(
++			'clientPeerConfig',
++			(config: { forceRelayOnly: boolean; iceServers: RTCIceServer[] }) => {
++				if (!config?.iceServers?.length) {
++					return;
++				}
++				this.peerConfig = {
++					iceTransportPolicy: config.forceRelayOnly || this.natFix ? 'relay' : 'all',
++					iceServers: config.iceServers,
++				};
++				console.log('[client.clientPeerConfig]', this.peerConfig);
++			}
++		);
+ 		this.socketIOClient.on('connect', () => {
+ 			console.log('[client.connect]');
+ 			if (this.connectionState !== ConnectionState.disconnected) {

@@ -26,6 +26,33 @@ COPY --chown=node:node types/ types/
 RUN yarn compile
 
 #################################################
+# Web client stage (the page served at /app)
+#################################################
+# Debian rather than alpine: upstream pins .nvmrc 24.19.0 and its toolchain pulls
+# prebuilt binaries that expect glibc.
+FROM node:24-bookworm-slim as webclient
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+# The client is cloned rather than vendored, so this repo stays a signaling server
+# instead of carrying a second copy of an Angular app. Pinned to a commit: the
+# patches are written against this exact tree, so moving it means re-checking them.
+ARG WEBCLIENT_REPO=https://github.com/OhMyGuus/BetterCrewlink-mobile.git
+ARG WEBCLIENT_COMMIT=8bc441fee5424c82431fc7b0c6fc73ff3ea99858
+RUN git clone "$WEBCLIENT_REPO" app \
+    && cd app && git -c advice.detachedHead=false checkout "$WEBCLIENT_COMMIT"
+WORKDIR /build/app
+COPY web/patches/ /build/patches/
+RUN for p in /build/patches/*.patch; do echo "applying $p"; git apply "$p"; done
+# bcl-mobile-overlay is a file: dependency whose entry point is dist/, which upstream
+# does not commit -- game-helper.service.ts will not resolve without it. It is an
+# Android overlay that does nothing on the web, but it still has to build.
+RUN cd plugins/bcl-mobile-overlay && npm ci --ignore-scripts && npm run build
+RUN npm ci --ignore-scripts
+# --base-href has to match the mount point in src/index.ts.
+RUN npx ng build --configuration production --base-href /app/
+
+#################################################
 # Production stage
 #################################################
 FROM common
@@ -36,6 +63,9 @@ COPY views/ views/
 # should be. Offsets are gauranteed to change
 # over time, but src has more changes in `git log`.
 COPY public/ public/
+# Served at /app; src/index.ts detects its absence and hides the link rather than
+# 404ing, so a build without this stage still runs.
+COPY --from=webclient /build/app/www/ webclient/
 COPY --from=build /app/dist/ dist
 EXPOSE 9736
 # Only needed when integratedRelay is enabled; must match minPort/maxPort in

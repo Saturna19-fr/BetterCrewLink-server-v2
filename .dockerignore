@@ -1,0 +1,15 @@
+# Every COPY in the Dockerfile is explicit, so nothing here is load-bearing for
+# correctness -- but the web client stage makes the context worth trimming, and
+# .env must never end up in an image layer by accident.
+.git/
+.idea/
+node_modules/
+dist/
+webclient/
+web/.build/
+.env
+.env.*
+!.env.example
+config/peerConfig.yml
+*.log
+*.png

@@ -3,10 +3,10 @@ dotenv.config();
 import express from 'express';
 import { Server } from 'http';
 import { Server as HttpsServer } from 'https';
-import { readFileSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { monitorEventLoopDelay } from 'perf_hooks';
-import socketIO from 'socket.io';
+import { Server as IOServer, Socket as IOSocket } from 'socket.io';
 import Tracer from 'tracer';
 import morgan from 'morgan';
 import peerConfig from './peerConfig';
@@ -90,7 +90,16 @@ if (peerConfig.integratedRelay.enabled) {
 	turnServer.start();
 }
 
-const io = socketIO(server, {
+const io = new IOServer(server, {
+	// Desktop BetterCrewLink is pinned to socket.io-client 2.4.0 (EIO=3) while the
+	// web/mobile client is on 4.8 (EIO=4). Both have to reach this server, so keep
+	// the v2 protocol enabled -- this is what the official server does.
+	allowEIO3: true,
+	// v2 defaulted to `origins: '*:*'`, accepting every browser origin. v3+ rejects
+	// cross-origin requests unless CORS is spelled out. The bundled client at /app is
+	// same-origin, but the Android app is not, and neither is anyone pointing
+	// web.bettercrewl.ink at this server.
+	cors: { origin: true, credentials: true },
 	// No native client loads the served bundle.
 	serveClient: false,
 	// engine.io v3 enables permessage-deflate by default at a 1 KB threshold,
@@ -103,6 +112,13 @@ const io = socketIO(server, {
 	// costly full reconnects (polling handshake then upgrade).
 	pingInterval: 25000,
 	pingTimeout: 20000,
+});
+
+// A client that cannot complete the handshake never reaches io.on('connection'),
+// so without this a protocol mismatch looks like silence from the server side
+// while the client spins forever on "connecting".
+io.engine.on('connection_error', (err: { code: number; message: string }) => {
+	logger.warn('Handshake failed: %s (%s)', err.message, err.code);
 });
 
 const clients = new Map<string, Client>();
@@ -140,11 +156,13 @@ const emitsOut: { [event: string]: number } = Object.create(null);
 const recipientsOut: { [event: string]: number } = Object.create(null);
 const droppedEvents: { [event: string]: number } = Object.create(null);
 let connectionCount = 0;
+/** Live connections split by engine.io protocol; see the note in GET /health. */
+const protocolCounts = { eio3: 0, eio4: 0 };
 
 function roomSize(room: string | null): number {
 	if (!room) return 0;
-	const r = io.sockets.adapter.rooms[room];
-	return r ? r.length : 0;
+	const r = io.sockets.adapter.rooms.get(room);
+	return r ? r.size : 0;
 }
 
 function countEmit(event: string, recipients: number) {
@@ -153,7 +171,7 @@ function countEmit(event: string, recipients: number) {
 }
 
 /** Broadcast to everyone in the room except the sender, recording fan-out size. */
-function broadcastToRoom(socket: socketIO.Socket, room: string, event: string, ...args: any[]) {
+function broadcastToRoom(socket: IOSocket, room: string, event: string, ...args: any[]) {
 	socket.to(room).emit(event, ...args);
 	countEmit(event, Math.max(0, roomSize(room) - 1));
 }
@@ -197,8 +215,8 @@ const RATE_LIMITS: { [event: string]: RateLimit } = {
 };
 
 /**
- * Per-socket token bucket. Over-budget packets are dropped silently: passing an
- * error to next() in socket.io v2 emits an error event and can tear the socket down.
+ * Per-socket token bucket. Over-budget packets are dropped silently rather than
+ * answered with an error, which would tear the socket down over a burst.
  */
 function createRateLimiter() {
 	const buckets = new Map<string, { tokens: number; last: number }>();
@@ -227,6 +245,23 @@ function isValidLobbyCode(c: unknown): c is string {
 	return typeof c === 'string' && c.length > 0 && c.length <= MAX_LOBBY_CODE_LENGTH && !RESERVED_ROOMS.has(c);
 }
 
+const MOBILE_ROOM_SUFFIX = '_mobile';
+
+/**
+ * The second room a lobby spans. The mobile client discovers the desktop "Mobile
+ * Host" in `<CODE>_mobile`, then re-joins the real lobby `<CODE>` for voice.
+ *
+ * Returns null when the paired name would not itself be a joinable lobby, which is
+ * what stops a client joining `lobbybrowser_mobile` -- a perfectly valid code --
+ * from pairing into the reserved browser room and reaching every browser client.
+ */
+function pairedRoom(code: string): string | null {
+	const paired = code.endsWith(MOBILE_ROOM_SUFFIX)
+		? code.slice(0, -MOBILE_ROOM_SUFFIX.length)
+		: code + MOBILE_ROOM_SUFFIX;
+	return isValidLobbyCode(paired) ? paired : null;
+}
+
 function removePublicLobby(c: string) {
 	const lobby = publicLobbies.get(c);
 	if (!lobby) return;
@@ -239,6 +274,34 @@ function removePublicLobby(c: string) {
 app.enable('trust proxy');
 app.set('views', join(__dirname, '../views'));
 app.use('/public', express.static(join(__dirname, '../public'), { maxAge: '7d', immutable: true }));
+
+// The self-hosted web client, so a player on a phone just opens this server's URL
+// (see web/README.md). Serving it here rather than from a second container keeps it
+// same-origin with the socket: no CORS, no second certificate, and the client can
+// default its "voice server" field to wherever it was loaded from.
+const webClientDir = join(__dirname, '../webclient');
+const hasWebClient = existsSync(join(webClientDir, 'index.html'));
+app.use(
+	'/app',
+	express.static(webClientDir, {
+		maxAge: '7d',
+		immutable: true,
+		setHeaders: (res, filePath) => {
+			// Angular's bundles are content-hashed and safe to cache hard. These are
+			// not: a stale ngsw.json pins every returning visitor to an old build.
+			if (/(index\.html|ngsw\.json|ngsw-worker\.js|manifest\.webmanifest)$/.test(filePath)) {
+				res.setHeader('Cache-Control', 'no-cache');
+			}
+		},
+	})
+);
+// Angular routes are resolved client-side, so anything still unmatched under /app
+// is a deep link into the app rather than a missing file.
+app.get('/app/*', (req, res, next) => {
+	res.sendFile(join(webClientDir, 'index.html'), (err) => {
+		if (err) next();
+	});
+});
 app.set('view engine', 'pug');
 app.use(morgan('combined', { skip: (req) => req.url === '/health' }));
 
@@ -281,7 +344,7 @@ turnCredentials.start(rebuildPeerConfig);
 
 app.get('/', (req, res) => {
 	let address = req.protocol + '://' + req.hostname;
-	res.render('index', { connectionCount, address, lobbiesCount: allLobbies.size });
+	res.render('index', { connectionCount, address, lobbiesCount: allLobbies.size, hasWebClient });
 });
 
 app.get('/health', (req, res) => {
@@ -290,9 +353,16 @@ app.get('/health', (req, res) => {
 	res.json({
 		uptime: process.uptime(),
 		connectionCount,
+		// EIO=3 is the desktop client (socket.io-client v2), EIO=4 the web/mobile one.
+		// This is how you tell whether phones are actually landing, and the signal for
+		// whether allowEIO3 is still carrying anyone.
+		protocols: { ...protocolCounts },
 		lobbiesCount: allLobbies.size,
 		address,
 		name: process.env.NAME,
+		// Whether this build actually shipped the web client -- the difference between
+		// "phones can join here" and a 404 at /app.
+		webClient: hasWebClient,
 		publicLobbiesCount: publicLobbies.size,
 		browserClients: roomSize(LOBBY_BROWSER_ROOM),
 		eventLoopDelayMs: {
@@ -312,7 +382,7 @@ app.get('/lobbies', (req, res) => {
 	res.json(Array.from(publicLobbies.values()));
 });
 
-const leaveroom = (socket: socketIO.Socket, code: string | null) => {
+const leaveroom = (socket: IOSocket, code: string | null) => {
 	if (!code) {
 		return;
 	}
@@ -326,28 +396,41 @@ const leaveroom = (socket: socketIO.Socket, code: string | null) => {
 	}
 };
 
-io.on('connection', (socket: socketIO.Socket) => {
+io.on('connection', (socket: IOSocket) => {
 	connectionCount++;
+	const protocol = socket.conn.protocol === 3 ? 'eio3' : 'eio4';
+	protocolCounts[protocol]++;
 	let code: string | null = null;
 	/** Last VAD state broadcast for this socket; null means "unknown, always send". */
 	let lastVad: boolean | null = null;
 	const allow = createRateLimiter();
 
-	socket.use((packet, next) => {
-		const event = packet[0];
+	// socket.use() was removed in socket.io v3. onAny still runs ahead of the regular
+	// listeners, so counting here keeps the v2 middleware's behaviour of recording
+	// every inbound packet -- including events nobody registered a handler for.
+	socket.onAny((event: string) => {
 		eventsIn[event] = (eventsIn[event] || 0) + 1;
-		if (!allow(event)) {
-			// Counted per event rather than in aggregate: a silently dropped signal
-			// breaks a peer connection, and that has to be visible on /health.
-			droppedEvents[event] = (droppedEvents[event] || 0) + 1;
-			return;
-		}
-		next();
 	});
+
+	// onAny cannot stop propagation, though, so the token bucket has to wrap each
+	// registration instead. Every handler below MUST go through `on`: one registered
+	// straight on `socket` silently loses its rate limit. The exception is
+	// 'disconnect', a local lifecycle event that the v2 middleware never saw either.
+	const on = (event: string, handler: (...args: any[]) => void) => {
+		socket.on(event, (...args: any[]) => {
+			if (!allow(event)) {
+				// Counted per event rather than in aggregate: a silently dropped signal
+				// breaks a peer connection, and that has to be visible on /health.
+				droppedEvents[event] = (droppedEvents[event] || 0) + 1;
+				return;
+			}
+			handler(...args);
+		});
+	};
 
 	socket.emit('clientPeerConfig', currentPeerConfig);
 
-	socket.on('join', (c: string, id: number, clientId: number, isHost?: boolean) => {
+	on('join', (c: string, id: number, clientId: number, isHost?: boolean) => {
 		if (!isValidLobbyCode(c) || typeof id !== 'number' || typeof clientId !== 'number') {
 			socket.disconnect();
 			logger.error(`Socket %s sent invalid join command: %s %s %s`, socket.id, c, id, clientId);
@@ -356,9 +439,9 @@ io.on('connection', (socket: socketIO.Socket) => {
 
 		// Snapshot the peers already present before joining the room ourselves.
 		let otherClients: any = {};
-		const existingRoom = io.sockets.adapter.rooms[c];
+		const existingRoom = io.sockets.adapter.rooms.get(c);
 		if (existingRoom) {
-			for (let s of Object.keys(existingRoom.sockets)) {
+			for (let s of existingRoom) {
 				if (s !== socket.id) otherClients[s] = clients.get(s);
 			}
 		}
@@ -388,7 +471,7 @@ io.on('connection', (socket: socketIO.Socket) => {
 		socket.emit('setClients', otherClients);
 	});
 
-	socket.on('setHost', (c: string, clientId: number) => {
+	on('setHost', (c: string, clientId: number) => {
 		if (code === c && typeof clientId === 'number') {
 			const lobby = allLobbies.get(c);
 			if (lobby) {
@@ -398,7 +481,7 @@ io.on('connection', (socket: socketIO.Socket) => {
 		}
 	});
 
-	socket.on('id', (id: number, clientId: number) => {
+	on('id', (id: number, clientId: number) => {
 		if (typeof id !== 'number' || typeof clientId !== 'number') {
 			socket.disconnect();
 			logger.error(`Socket %s sent invalid id command: %d %d`, socket.id, id, clientId);
@@ -420,7 +503,7 @@ io.on('connection', (socket: socketIO.Socket) => {
 		if (code) broadcastToRoom(socket, code, 'setClient', socket.id, client);
 	});
 
-	socket.on('leave', () => {
+	on('leave', () => {
 		if (code) {
 			leaveroom(socket, code);
 			// Was never reset, so the socket kept broadcasting into a room it had left.
@@ -430,7 +513,7 @@ io.on('connection', (socket: socketIO.Socket) => {
 		clients.delete(socket.id);
 	});
 
-	socket.on('VAD', (activity: boolean) => {
+	on('VAD', (activity: boolean) => {
 		if (typeof activity !== 'boolean') return;
 		// Clients re-send the current state continuously rather than only on change, so
 		// collapse repeats: only a genuine transition is worth a room-wide broadcast.
@@ -449,7 +532,7 @@ io.on('connection', (socket: socketIO.Socket) => {
 		}
 	});
 
-	socket.on('join_lobby', (id: number, callbackFn) => {
+	on('join_lobby', (id: number, callbackFn) => {
 		if (typeof callbackFn !== 'function') return;
 		//ban check etc...
 		const lobbyCode = lobbyCodes.get(id);
@@ -465,7 +548,7 @@ io.on('connection', (socket: socketIO.Socket) => {
 		callbackFn(1, 'Lobby not found :C');
 	});
 
-	socket.on('lobby', (c: string, publicLobby: PublicLobby) => {
+	on('lobby', (c: string, publicLobby: PublicLobby) => {
 		if (code != c) {
 			logger.error(`Got request to host lobby while not in it %s`, c, code);
 			return;
@@ -502,7 +585,7 @@ io.on('connection', (socket: socketIO.Socket) => {
 		}
 	});
 
-	socket.on('remove_lobby', (c: string) => {
+	on('remove_lobby', (c: string) => {
 		if (code != c) {
 			logger.error(`Got request to host lobby while not in it %s`, c, code);
 			return;
@@ -510,7 +593,7 @@ io.on('connection', (socket: socketIO.Socket) => {
 		removePublicLobby(c);
 	});
 
-	socket.on('signal', (signal: Signal) => {
+	on('signal', (signal: Signal) => {
 		if (typeof signal !== 'object' || !signal.data || !signal.to || typeof signal.to !== 'string') {
 			socket.disconnect();
 			logger.error(`Socket %s sent invalid signal command: %j`, socket.id, signal);
@@ -520,8 +603,20 @@ io.on('connection', (socket: socketIO.Socket) => {
 		// `to` was previously unvalidated, so it could name a *room* (e.g.
 		// 'lobbybrowser') and fan a payload out to everyone in it, or target a peer
 		// in another lobby to force a connection attempt and expose their IP.
-		const room = code ? io.sockets.adapter.rooms[code] : null;
-		if (!room || !room.sockets[to]) return;
+		// Resolving `to` as a live socket is what rules out room names; the room test
+		// below is what rules out other lobbies. `to === code` closes the corner where
+		// a client joins a lobby named after somebody's socket id, since every socket
+		// also sits in a room named by its own id.
+		if (!code || to === code) return;
+		const target = io.sockets.sockets.get(to);
+		if (!target) return;
+		const paired = pairedRoom(code);
+		// Crossing the pair is what makes mobile work: the phone leaves `<CODE>_mobile`
+		// when it re-joins `<CODE>` for voice, while the Mobile Host stays behind and
+		// keeps streaming game state to it. Requiring a shared room silently dropped
+		// that stream the moment the phone moved, freezing it. Allowing the pair grants
+		// no new reach: getting into either room already requires the lobby code.
+		if (!target.rooms.has(code) && !(paired && paired !== to && target.rooms.has(paired))) return;
 		io.to(to).emit('signal', {
 			data,
 			from: socket.id,
@@ -529,7 +624,7 @@ io.on('connection', (socket: socketIO.Socket) => {
 		countEmit('signal', 1);
 	});
 
-	socket.on('lobbybrowser', (open) => {
+	on('lobbybrowser', (open) => {
 		if (!open) {
 			socket.leave(LOBBY_BROWSER_ROOM);
 		} else {
@@ -546,6 +641,7 @@ io.on('connection', (socket: socketIO.Socket) => {
 		code = null;
 		clients.delete(socket.id);
 		connectionCount--;
+		protocolCounts[protocol]--;
 
 		// if (turnServer) {
 		// 	logger.info(`Removing socket "${socket.id}" as TURN user.`);
@@ -614,7 +710,8 @@ function shutdown(signal: string) {
 	// full grace period before SIGKILL, dropping every client at once.
 	const force = setTimeout(() => process.exit(1), 10000);
 	force.unref();
-	// v2's io.close() also closes the underlying HTTP server.
+	// io.close() force-closes every namespace socket -- which runs the disconnect
+	// handler above, so lobby cleanup still happens -- then closes the HTTP server.
 	turnCredentials.stop();
 	io.close(() => {
 		try {

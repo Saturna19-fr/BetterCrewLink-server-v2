@@ -31,6 +31,7 @@
 ## Table of Contents
 
 * [About the Project](#about-the-project)
+* [Web Client for Phones](#web-client-for-phones)
 * [Deploy to Heroku](#deploy-to-heroku)
 * [Deploy to Repl.it](#deploy-to-replit)
 * [Docker Quickstart](#docker-quickstart)
@@ -94,6 +95,38 @@ Set these and leave `integratedRelay.enabled` at `false`:
 Create a key at Cloudflare dashboard -> Realtime -> TURN. If these are unset the server behaves
 exactly as before and clients get STUN only. If the API is unreachable the server keeps running and
 degrades to STUN only rather than failing to start; check `turn` in `GET /health` for status.
+
+## Web Client for Phones
+
+Players on a phone cannot run the desktop client, and the game itself is not what carries
+the voice — so this server can serve its own build of the BetterCrewLink web client at
+`/app`. A player opens `https://your-server/app`, types the lobby code and a name, and
+talks. The index page links to it when it is present.
+
+Two things are required, and both are easy to miss:
+
+ - **One player on PC with "Mobile Host" enabled** in BetterCrewLink, in the same lobby.
+   A phone has no way to read the game state itself, so without a host it sits on
+   *"connecting to voice server"* forever — by design, not a fault.
+ - **HTTPS.** Browsers only grant microphone access in a secure context, so a bare
+   `http://ip:9736` will never work from a browser. Put the server behind a reverse proxy
+   or a Cloudflare Tunnel (leave `HTTPS` unset in that case — see above).
+
+The page is built from upstream sources at a pinned commit with two local patches, one of
+which makes phones use *this* server's TURN credentials instead of the ones frozen into
+the upstream bundle. See [web/README.md](web/README.md). `docker build .` includes it;
+without Docker, run `bash web/build-local.sh`. If it was never built the server still runs
+and `GET /health` reports `webClient: false`.
+
+### Client protocol compatibility
+
+This server runs socket.io 4 with `allowEIO3: true`, so both client generations connect:
+desktop BetterCrewLink (`socket.io-client` 2.x, EIO=3) and the web/mobile client
+(`socket.io-client` 4.x, EIO=4). `GET /health` splits live connections as
+`protocols.{eio3,eio4}`. This is worth knowing if you run an older fork of this server:
+those are socket.io 2 only, and the official web client hangs on *"connecting to voice
+server"* against them with nothing in the logs, because the handshake itself never
+completes.
 
 ## Deploy to Heroku
 

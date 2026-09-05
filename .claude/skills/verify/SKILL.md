@@ -5,9 +5,16 @@ description: Build, launch and drive the BetterCrewLink signaling server to obse
 
 # Verifying the BetterCrewLink server
 
-The surface is a **socket.io v2 server plus three HTTP endpoints**. Drive it with a real
-`socket.io-client` connection — it ships as a transitive dep of `socket.io`, so
-`require('socket.io-client')` resolves with no extra install.
+The surface is a **socket.io v4 server running `allowEIO3: true`, plus four HTTP endpoints**.
+Both client generations must keep working: desktop BetterCrewLink is pinned to
+`socket.io-client` 2.4.0 (EIO=3), the web/mobile client is on 4.8 (EIO=4). Drive it with a
+real client connection — `socket.io-client` (v4) and `socket.io-client-v2` (an npm alias of
+2.4.0) are explicit devDependencies, since socket.io v4 no longer pulls a client in.
+
+```js
+const { io: ioV4 } = require('socket.io-client'); // v4 no longer exports a callable default
+const ioV2 = require('socket.io-client-v2');
+```
 
 ## Build and launch
 
@@ -27,6 +34,21 @@ answers; startup is ~1s but is not instant.
   counters. This is the fastest way to confirm behaviour without instrumenting the client.
 - `GET /lobbies` — array of public lobbies.
 - `GET /` — pug page.
+- `GET /app` — the self-hosted web client, only present when `webclient/` was built
+  (see web/README.md). `/health` reports `webClient: true|false`.
+
+**Protocol check — run this before anything else after touching socket.io setup:**
+
+```bash
+curl -s "http://127.0.0.1:29736/socket.io/?EIO=3&transport=polling"   # v3 framing: 117:0{...}
+curl -s "http://127.0.0.1:29736/socket.io/?EIO=4&transport=polling"   # v4 framing: 0{...}
+curl -si -H "Origin: https://example.com" "http://127.0.0.1:29736/socket.io/?EIO=4&transport=polling" | grep -i access-control
+```
+
+The first two must *both* answer. A server that only answers one has broken half its client
+base, and the client just spins on "connecting" with nothing in the logs. CORS must reflect
+the origin and send `Access-Control-Allow-Credentials: true`: v2 did this by default via
+`origins: '*:*'`, v4 only does it because of the explicit `cors` option.
 
 **`events.recipients / events.emits` is the key ratio** for fan-out changes. `new_lobbies`
 must be **1.0** (one recipient per emit); anything higher means the lobby-browser broadcast
@@ -60,6 +82,17 @@ Minimum flow to make lobby code execute:
 - **`socket.disconnect()` on malformed input.** Bad `signal.to`, bad `join` args, or a
   reserved/oversized lobby code drop the socket. Rate-limited events are *dropped silently*
   instead — the socket stays up, and the drop only shows in `events.dropped`.
+- **Rate limiting is a registration wrapper, not middleware.** `socket.use()` is gone in v4,
+  so handlers register through the local `on(...)` helper; one registered straight on
+  `socket` silently loses its rate limit. `eventsIn` is counted separately in `onAny`, which
+  is why it also counts events no handler is listening for.
+- **Verify both protocols.** A regression that only breaks EIO=3 is invisible to a v4-only
+  test, and vice versa. `/health` splits live connections as `protocols.{eio3,eio4}`, and
+  `io.engine.on('connection_error')` logs handshakes that never reached `connection`.
+- **A lobby spans two rooms.** The mobile client joins `<CODE>_mobile` to find the desktop
+  Mobile Host, then re-joins `<CODE>` — leaving the first while the host stays in it. `signal`
+  deliberately crosses that pair (`pairedRoom`); anything that tightens it back to a single
+  room silently freezes every phone in the lobby.
 - **SIGTERM is not deliverable on Windows** (`child.kill` uses TerminateProcess), so the
   graceful-shutdown path can only be verified on Linux/Docker.
 - **Idle event-loop delay reads ~15ms p50 on Windows** because of timer granularity. That is
