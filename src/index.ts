@@ -175,7 +175,12 @@ interface RateLimit {
 }
 
 const RATE_LIMITS: { [event: string]: RateLimit } = {
-	VAD: { capacity: 40, refillPerSec: 20 },
+	// VAD carries *state* (talking / not talking), so a dropped packet leaves a peer's
+	// indicator stuck rather than just losing one frame. Real clients emit it in bursts
+	// well above any transition rate -- a production server dropped 171 of 213 at 20/s --
+	// so this budget only exists to bound a malicious flood. The duplicate suppression in
+	// the handler is what actually keeps the broadcast rate down.
+	VAD: { capacity: 200, refillPerSec: 100 },
 	// Joining a 10-player lobby negotiates with 9 peers at once, which with trickle
 	// ICE is a legitimate burst of ~90-130 packets. Dropping one silently breaks
 	// that peer link, so this is set well above any real burst -- it exists to stop
@@ -324,6 +329,8 @@ const leaveroom = (socket: socketIO.Socket, code: string | null) => {
 io.on('connection', (socket: socketIO.Socket) => {
 	connectionCount++;
 	let code: string | null = null;
+	/** Last VAD state broadcast for this socket; null means "unknown, always send". */
+	let lastVad: boolean | null = null;
 	const allow = createRateLimiter();
 
 	socket.use((packet, next) => {
@@ -358,6 +365,7 @@ io.on('connection', (socket: socketIO.Socket) => {
 
 		if (code != c) leaveroom(socket, code);
 		code = c;
+		lastVad = null;
 		socket.join(code);
 
 		const lobby = allLobbies.get(c);
@@ -418,10 +426,19 @@ io.on('connection', (socket: socketIO.Socket) => {
 			// Was never reset, so the socket kept broadcasting into a room it had left.
 			code = null;
 		}
+		lastVad = null;
 		clients.delete(socket.id);
 	});
 
 	socket.on('VAD', (activity: boolean) => {
+		if (typeof activity !== 'boolean') return;
+		// Clients re-send the current state continuously rather than only on change, so
+		// collapse repeats: only a genuine transition is worth a room-wide broadcast.
+		// This bounds fan-out by how often someone actually starts or stops talking,
+		// without adding any latency to the transition itself.
+		if (activity === lastVad) return;
+		lastVad = activity;
+
 		let client = clients.get(socket.id);
 		if (code && client) {
 			broadcastToRoom(socket, code, 'VAD', {
