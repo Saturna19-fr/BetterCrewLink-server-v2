@@ -54,4 +54,27 @@ if (fs.existsSync(PEER_CONFIG_PATH)) {
 	}
 }
 
+/**
+ * Returns undefined for unset, blank, or unrecognised values so that a variable
+ * left empty in a hosting panel is treated as "not configured" rather than false.
+ */
+function parseBoolEnv(name: string): boolean | undefined {
+	const raw = process.env[name];
+	if (raw === undefined) return undefined;
+	const value = raw.trim().toLowerCase();
+	if (value === '') return undefined;
+	if (value === '1' || value === 'true' || value === 'yes' || value === 'on') return true;
+	if (value === '0' || value === 'false' || value === 'no' || value === 'off') return false;
+	console.warn(`Ignoring ${name}: expected a boolean, got "${raw}".`);
+	return undefined;
+}
+
+// Environment overrides. Container deployments (Docker, Coolify, Heroku) have no
+// practical way to mount config/peerConfig.yml, so the settings an operator is
+// most likely to need at runtime are also reachable from the environment.
+const forceRelayOnly = parseBoolEnv('FORCE_RELAY_ONLY');
+if (forceRelayOnly !== undefined) {
+	peerConfig.forceRelayOnly = forceRelayOnly;
+}
+
 export default peerConfig;

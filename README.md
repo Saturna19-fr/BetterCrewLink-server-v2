@@ -72,6 +72,13 @@ Set these and leave `integratedRelay.enabled` at `false`:
    never in `config/peerConfig.yml`, and keep it out of git.
  - `CF_TURN_TTL_SECONDS`: Credential lifetime, default `86400` (24h), minimum `600`. Credentials are
    refreshed automatically at half-life.
+ - `FORCE_RELAY_ONLY`: Route every connection through TURN instead of letting players connect
+   directly. Overrides `forceRelayOnly` in `config/peerConfig.yml`, which container deployments
+   cannot easily mount. Two uses: set it temporarily to confirm your relay works for everyone,
+   or leave it on so players never learn each other's IP addresses. Costs relay bandwidth and
+   adds a hop of latency.
+ - `LOBBY_TTL_MINUTES`: Grace period, default `15`, before an *orphaned* public lobby is dropped
+   from the browser. A lobby that still has players in it is never evicted on this timer.
 
 Create a key at Cloudflare dashboard -> Realtime -> TURN. If these are unset the server behaves
 exactly as before and clients get STUN only. If the API is unreachable the server keeps running and

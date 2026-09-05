@@ -10,6 +10,8 @@
 
 # Force CrewLink to only work through TURN servers. This is great if you want to protect the IP addresses of players
 # as no direct connection will be made. At least one TURN server is required if set to true.
+# Can also be set with the FORCE_RELAY_ONLY environment variable, which takes precedence
+# and is the only way to reach this setting in a container deployment.
 forceRelayOnly: false
 
 # Settings for the built-in TURN server.

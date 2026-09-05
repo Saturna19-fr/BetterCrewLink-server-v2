@@ -29,9 +29,9 @@ const RESERVED_ROOMS = new Set([LOBBY_BROWSER_ROOM]);
 const MAX_LOBBY_CODE_LENGTH = 32;
 
 /**
- * A public lobby is dropped from the browser this long after its host last
- * advertised it. Hosts re-emit `lobby` on state change, so this only evicts
- * lobbies whose host vanished without a clean disconnect.
+ * Grace period before an *orphaned* public lobby (one whose socket.io room is
+ * already empty) is dropped from the browser. Lobbies with players still in them
+ * are never evicted on this timer -- see the sweep below.
  */
 const LOBBY_TTL_MS = (Number(process.env.LOBBY_TTL_MINUTES) || 15) * 60000;
 const LOBBY_SWEEP_INTERVAL_MS = 60000;
@@ -548,11 +548,17 @@ setInterval(() => {
 	broadcastToBrowsers('new_lobbies', Array.from(publicLobbies.values()));
 }, BROWSER_RESYNC_INTERVAL_MS).unref();
 
-// Evict lobbies whose host stopped advertising, so the browser stops listing
-// dead entries with a frozen gameState.
+// Safety net for orphaned browser entries. leaveroom already drops a public lobby
+// when its room empties, so this only catches entries that outlived their room.
+//
+// A lobby whose room still has members is LIVE and must never be evicted, even if
+// nobody has re-advertised it recently: hosts only emit `lobby` on state change, so
+// a lobby sitting idle waiting for players would otherwise delist itself -- which is
+// exactly the lobby that most needs to stay listed.
 setInterval(() => {
 	const cutoff = Date.now() - LOBBY_TTL_MS;
 	for (const entry of lobbyLastSeen) {
+		if (roomSize(entry[0]) > 0) continue;
 		if (entry[1] < cutoff) removePublicLobby(entry[0]);
 	}
 }, LOBBY_SWEEP_INTERVAL_MS).unref();
