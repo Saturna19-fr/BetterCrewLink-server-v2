@@ -58,6 +58,25 @@ Optional environment variables:
  - `HTTPS`: Enables https. You must place `privkey.pem` and `fullchain.pem` in your CWD.
  - `SSLPATH`: Specifies an alternate path to SSL certificates.
 
+### Managed TURN (recommended)
+
+Players behind symmetric NAT or CGNAT (mobile carriers, some ISPs) cannot establish a direct
+peer connection and need a TURN relay to hear anyone. Rather than running the integrated relay --
+which needs UDP ports published directly on the host, and cannot be put behind a reverse proxy
+such as Traefik or nginx -- you can point clients at a managed TURN service.
+
+Set these and leave `integratedRelay.enabled` at `false`:
+
+ - `CF_TURN_KEY_ID`: Cloudflare Realtime TURN key ID.
+ - `CF_TURN_API_TOKEN`: API token for that key. **This is a secret** -- put it in the environment,
+   never in `config/peerConfig.yml`, and keep it out of git.
+ - `CF_TURN_TTL_SECONDS`: Credential lifetime, default `86400` (24h), minimum `600`. Credentials are
+   refreshed automatically at half-life.
+
+Create a key at Cloudflare dashboard -> Realtime -> TURN. If these are unset the server behaves
+exactly as before and clients get STUN only. If the API is unreachable the server keeps running and
+degrades to STUN only rather than failing to start; check `turn` in `GET /health` for status.
+
 ## Deploy to Heroku
 
 To get up and running quickly, you can deploy to Heroku clicking on the button below:

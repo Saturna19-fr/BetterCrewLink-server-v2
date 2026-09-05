@@ -16,7 +16,11 @@
  "scripts": {
   "start": "yarn compile && node dist/index.js",
   "compile": "tsc",
+  "smoke": "yarn compile && node smoke-test.js",
   "heroku-postbuild": "yarn compile"
+ },
+ "engines": {
+  "node": ">=18"
  },
  "devDependencies": {
   "@types/express": "^4.17.13",

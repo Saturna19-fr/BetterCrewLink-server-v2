@@ -14,19 +14,29 @@ forceRelayOnly: false
 
 # Settings for the built-in TURN server.
 integratedRelay:
+  # Leave this false if you use a managed TURN provider (see CF_TURN_KEY_ID in the README).
+  # Enabling it requires HOSTNAME to be set and the UDP ports below reachable directly on the host --
+  # a reverse proxy cannot forward TURN, because relay ports are allocated dynamically.
   enabled: true # Use the-built in relay server if you run a small-scale server for private use.
   #relayIps: ['192.0.2.1']
   #listeningIps: ['192.0.2.1']
   #externalIps: { 'default': '192.0.2.1' }
+  # One UDP port is used per active relay allocation. The old 49152-65535 range
+  # was 16383 ports, which under Docker bridge networking spawns a docker-proxy
+  # process per published port. Widen this only if you actually run out.
   minPort: 49152
-  maxPort: 65535
+  maxPort: 50152
   listeningPort: 3478
   # Can be one of: OFF, FATAL, ERROR, WARN, INFO, DEBUG, TRACE, ALL
-  debugLevel: 'INFO'
+  # Keep at ERROR in production: the relay logs per-packet at the chattier levels.
+  debugLevel: 'ERROR'
   defaultUsername: 'M9DRVaByiujoXeuYAAAG'
   defaultPassword: 'TpHR9HQNZ8taxjb3'
-# If you run into performance issues, you may want to look into offloading relay duties to a native TURN/STUN
-# implementation. You can configure them below.
+# The integrated relay is a pure-JS TURN server that runs *inside* the signaling event loop, so every relayed
+# media packet competes with signaling callbacks. Opus at 20ms framing is ~100 packets/sec per relayed link, so
+# this becomes the dominant CPU cost well before the signaling code does. For anything beyond small private use,
+# set enabled: false above and run a native TURN server (coturn) as a separate process, then list it under
+# iceServers below. Clients pick this up automatically from clientPeerConfig at connect time -- no client change.
 
 # Custom TURN/STUN servers
 iceServers:

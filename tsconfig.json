@@ -1,16 +1,14 @@
 {
 	"compilerOptions": {
+		"target": "es2020",
+		"lib": ["es2020"],
 		"module": "commonjs",
 		"noImplicitAny": true,
 		"sourceMap": true,
 		"outDir": "dist",
-		"baseUrl": ".",
 		"esModuleInterop": true,
-		"paths": {
-			"*": [
-				"node_modules/*"
-			]
-		}
+		"skipLibCheck": true,
+		"noEmitOnError": true
 	},
 	"include": [
 		"src/**/*", "types/node-turn/index.d.ts"
