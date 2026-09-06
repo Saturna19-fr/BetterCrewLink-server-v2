@@ -276,21 +276,70 @@ const server = fork('dist/index.js', [], {
 	v2.emit('signal', { to: v4.id, data: { hello: 'v2' } });
 	check('signal relays v2 -> v4', !!(await sigToV4));
 
-	// --- mobile pairing: <CODE> and <CODE>_mobile are halves of one lobby ---
-	const mobHost = await connect();
+	// --- mobile: the real Mobile Host protocol, host on the desktop generation ---
+	// Desktop Voice.tsx never joins <CODE>_mobile and never learns a phone's socket id:
+	// it stays in <CODE> and addresses the *room* <CODE>_mobile by name in signal.to,
+	// both for the 5s mobileHostInfo beacon and the gameState stream. The phone joins
+	// <CODE>_mobile first, then <CODE> for voice, and must keep receiving the
+	// room-addressed stream after it moves. A production server that got either half
+	// wrong showed as signal in=91 / emits=0 on /health and a phone stuck forever on
+	// "Searching for bettercrewlink PC players".
+	const host = await connectV2();
 	const phone = await connect();
-	mobHost.emit('join', 'MOBILE1_mobile', 3, 303);
-	phone.emit('join', 'MOBILE1_mobile', 4, 404);
-	await wait(150);
-	const hostHello = once(phone, 'signal');
-	mobHost.emit('signal', { to: phone.id, data: { mobileHostInfo: { isHostingMobile: true } } });
-	check('Mobile Host reaches the phone inside <CODE>_mobile', !!(await hostHello));
-
-	phone.emit('join', 'MOBILE1', 4, 404); // the phone moves to the voice room
+	const pc2 = await connect();
+	host.emit('join', 'MOBILE1', 3, 303, true);
+	host.emit('id', 3, 303);
+	pc2.emit('join', 'MOBILE1', 6, 606);
+	pc2.emit('id', 6, 606);
+	phone.emit('join', 'MOBILE1_mobile', Date.now(), Date.now()); // what the client sends
 	await wait(200);
+
+	const hostHello = once(phone, 'signal');
+	host.emit('signal', { to: 'MOBILE1_mobile', data: { mobileHostInfo: { isHostingMobile: true, isGameHost: true } } });
+	const hello = await hostHello;
+	check('BUGFIX room-addressed mobileHostInfo reaches the phone in <CODE>_mobile',
+		!!hello && hello.from === host.id && !!hello.data.mobileHostInfo, JSON.stringify(hello));
+
+	const askSeen = once(host, 'signal');
+	phone.emit('signal', { to: host.id, data: { mobilePlayerInfo: { code: 'MOBILE1', askingForHost: true } } });
+	const ask = await askSeen;
+	check('phone in <CODE>_mobile can ask the host in <CODE> by socket id', !!ask && ask.from === phone.id);
+
+	const hostSeesPhone = once(host, 'join');
+	phone.emit('join', 'MOBILE1', 7, 707); // the phone moves to the voice room
+	check('phone joins the voice room and the host sees it', (await hostSeesPhone) !== undefined);
+
+	let pc2Leak = 0;
+	pc2.on('signal', () => pc2Leak++);
 	const gameState = once(phone, 'signal');
-	mobHost.emit('signal', { to: phone.id, data: { gameState: 1 } });
-	check('BUGFIX Mobile Host still reaches the phone once it joins <CODE>', !!(await gameState));
+	host.emit('signal', { to: 'MOBILE1_mobile', data: { gameState: 1, lobbySettings: {} } });
+	const gs = await gameState;
+	check('BUGFIX phone still receives the room-addressed gameState after joining <CODE>', !!gs && !!gs.data.gameState);
+	await wait(300);
+	check('room-addressed gameState is not fanned out to desktop peers in <CODE>', pc2Leak === 0, `pc2 got ${pc2Leak}`);
+
+	// --- SECURITY: room addressing works in exactly one direction ---
+	let hostLeak = 0;
+	host.on('signal', () => hostLeak++);
+	const rogue = await connect();
+	rogue.emit('join', 'MOBILE1_mobile', 8, 808);
+	await wait(150);
+	rogue.emit('signal', { to: 'MOBILE1', data: 'fan-out' });
+	await wait(300);
+	check('SECURITY a socket in <CODE>_mobile cannot fan out to the <CODE> room',
+		hostLeak === 0 && pc2Leak === 0, `host got ${hostLeak}, pc2 got ${pc2Leak}`);
+
+	// --- leaving drops the discovery room too, so lobbiesCount does not creep ---
+	const before = await get('/health');
+	phone.emit('leave');
+	rogue.emit('leave');
+	await wait(300);
+	const after = await get('/health');
+	check('BUGFIX leave drops the discovery room as well as the voice room',
+		!!before && !!after && before.lobbiesCount - after.lobbiesCount === 1,
+		`${before && before.lobbiesCount} -> ${after && after.lobbiesCount}`);
+	check('mobile stream stays inside the signal rate budget',
+		!!after && after.events.dropped.signal === undefined, after ? JSON.stringify(after.events.dropped) : 'no response');
 
 	const browser3 = await connect();
 	browser3.emit('lobbybrowser', true);
@@ -301,7 +350,7 @@ const server = fork('dist/index.js', [], {
 	sneaky.emit('signal', { to: browser3.id, data: { evil: true } });
 	check('SECURITY lobbybrowser_mobile does not pair into the reserved browser room', !(await leak));
 
-	for (const s of [v2, v4, mobHost, phone, browser3, sneaky]) s.close();
+	for (const s of [v2, v4, host, phone, pc2, rogue, browser3, sneaky]) s.close();
 	await wait(200);
 
 	// --- graceful shutdown on SIGTERM ---

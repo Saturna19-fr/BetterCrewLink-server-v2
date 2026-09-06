@@ -89,10 +89,15 @@ Minimum flow to make lobby code execute:
 - **Verify both protocols.** A regression that only breaks EIO=3 is invisible to a v4-only
   test, and vice versa. `/health` splits live connections as `protocols.{eio3,eio4}`, and
   `io.engine.on('connection_error')` logs handshakes that never reached `connection`.
-- **A lobby spans two rooms.** The mobile client joins `<CODE>_mobile` to find the desktop
-  Mobile Host, then re-joins `<CODE>` — leaving the first while the host stays in it. `signal`
-  deliberately crosses that pair (`pairedRoom`); anything that tightens it back to a single
-  room silently freezes every phone in the lobby.
+- **A lobby spans two rooms, and the host addresses one by name.** The phone joins
+  `<CODE>_mobile` to find the desktop Mobile Host, then joins `<CODE>` for voice **while staying
+  in `<CODE>_mobile`**. The desktop never joins `_mobile` and never learns the phone's socket
+  id: it stays in `<CODE>` and sends `signal { to: '<CODE>_mobile', ... }` — a *room name* — for
+  both its 5s `mobileHostInfo` beacon and the `gameState` stream. Two things must therefore
+  hold: `signal.to` may name the `_mobile` half of the sender's own lobby (that one direction
+  only), and `join(<CODE>)` must not evict the phone from `<CODE>_mobile` (`mobileRoom`). Break
+  either and every phone sits forever on *"Searching for bettercrewlink PC players"*, with
+  `/health` showing `events.in.signal` climbing while `events.emits.signal` stays absent.
 - **SIGTERM is not deliverable on Windows** (`child.kill` uses TerminateProcess), so the
   graceful-shutdown path can only be verified on Linux/Docker.
 - **Idle event-loop delay reads ~15ms p50 on Windows** because of timer granularity. That is

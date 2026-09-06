@@ -68,3 +68,8 @@ enter the lobby code and a name unique in that lobby, and connect.
 
 The page needs a secure context for microphone access, so the server must be reachable over
 HTTPS (a reverse proxy or a Cloudflare Tunnel in front of it — see the root README).
+
+If a phone sits on *"Searching for bettercrewlink PC players"* even though a Mobile Host is in
+the lobby, look at `GET /health`: `events.in.signal` climbing while `events.emits.signal` is
+absent means the server is dropping the host's beacon — it is sent to the *room* `<CODE>_mobile`
+by name, not to a socket id, and the phone has to stay in that room after joining `<CODE>`.

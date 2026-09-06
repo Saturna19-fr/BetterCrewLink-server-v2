@@ -401,6 +401,11 @@ io.on('connection', (socket: IOSocket) => {
 	const protocol = socket.conn.protocol === 3 ? 'eio3' : 'eio4';
 	protocolCounts[protocol]++;
 	let code: string | null = null;
+	/**
+	 * The `<CODE>_mobile` discovery room this socket stays a member of after moving to
+	 * `<CODE>`. Only a phone ever has one; see the mobile note in the join handler.
+	 */
+	let mobileRoom: string | null = null;
 	/** Last VAD state broadcast for this socket; null means "unknown, always send". */
 	let lastVad: boolean | null = null;
 	const allow = createRateLimiter();
@@ -446,7 +451,21 @@ io.on('connection', (socket: IOSocket) => {
 			}
 		}
 
-		if (code != c) leaveroom(socket, code);
+		// A phone joins `<CODE>_mobile` to find the desktop Mobile Host, then joins `<CODE>`
+		// for voice once it has spotted itself in the game state. The host keeps streaming
+		// that state to the *room* `<CODE>_mobile` (see the signal handler), so the phone
+		// has to stay a member of it. Upstream's server only ever left 4/6-char codes,
+		// which is what kept it there; an unconditional leave here hands the phone exactly
+		// one gameState and then freezes it.
+		if (code !== null && code === c + MOBILE_ROOM_SUFFIX) {
+			mobileRoom = code;
+		} else {
+			if (code != c) leaveroom(socket, code);
+			if (mobileRoom) {
+				if (mobileRoom !== c) leaveroom(socket, mobileRoom);
+				mobileRoom = null;
+			}
+		}
 		code = c;
 		lastVad = null;
 		socket.join(code);
@@ -509,6 +528,8 @@ io.on('connection', (socket: IOSocket) => {
 			// Was never reset, so the socket kept broadcasting into a room it had left.
 			code = null;
 		}
+		leaveroom(socket, mobileRoom);
+		mobileRoom = null;
 		lastVad = null;
 		clients.delete(socket.id);
 	});
@@ -600,22 +621,33 @@ io.on('connection', (socket: IOSocket) => {
 			return;
 		}
 		const { to, data } = signal;
-		// `to` was previously unvalidated, so it could name a *room* (e.g.
-		// 'lobbybrowser') and fan a payload out to everyone in it, or target a peer
-		// in another lobby to force a connection attempt and expose their IP.
-		// Resolving `to` as a live socket is what rules out room names; the room test
-		// below is what rules out other lobbies. `to === code` closes the corner where
-		// a client joins a lobby named after somebody's socket id, since every socket
-		// also sits in a room named by its own id.
+		// `to === code` closes the corner where a client joins a lobby named after
+		// somebody's socket id, since every socket also sits in a room named by its own id.
 		if (!code || to === code) return;
+
+		// The desktop Mobile Host addresses the discovery room by *name* -- Voice.tsx
+		// notifyMobilePlayers() and its gameState tick both send `to: code + '_mobile'`.
+		// It never learns a phone's socket id. This is the one place a room name is
+		// accepted, and only in this direction: a socket in `<CODE>` reaching the
+		// `<CODE>_mobile` half of its own lobby. Getting into either half already needs
+		// the lobby code, so this grants no new reach -- unlike the old unvalidated `to`,
+		// which could name 'lobbybrowser' and fan a payload out to every browser client.
+		if (to === code + MOBILE_ROOM_SUFFIX && isValidLobbyCode(to)) {
+			socket.to(to).emit('signal', { data, from: socket.id });
+			countEmit('signal', roomSize(to) - (socket.rooms.has(to) ? 1 : 0));
+			return;
+		}
+
+		// Anything else must resolve to a live socket in the sender's lobby, which is
+		// what stops a peer in another lobby being forced into a connection attempt
+		// that exposes their IP.
 		const target = io.sockets.sockets.get(to);
 		if (!target) return;
 		const paired = pairedRoom(code);
-		// Crossing the pair is what makes mobile work: the phone leaves `<CODE>_mobile`
-		// when it re-joins `<CODE>` for voice, while the Mobile Host stays behind and
-		// keeps streaming game state to it. Requiring a shared room silently dropped
-		// that stream the moment the phone moved, freezing it. Allowing the pair grants
-		// no new reach: getting into either room already requires the lobby code.
+		// The pair is crossed by socket id in one case: the phone, still only in
+		// `<CODE>_mobile`, answers the host's broadcast with `askingForHost` addressed
+		// to the host's socket id -- and the host sits in `<CODE>`. Allowing the paired
+		// room grants no new reach either, for the same reason as above.
 		if (!target.rooms.has(code) && !(paired && paired !== to && target.rooms.has(paired))) return;
 		io.to(to).emit('signal', {
 			data,
@@ -639,6 +671,8 @@ io.on('connection', (socket: IOSocket) => {
 	socket.on('disconnect', () => {
 		leaveroom(socket, code);
 		code = null;
+		leaveroom(socket, mobileRoom);
+		mobileRoom = null;
 		clients.delete(socket.id);
 		connectionCount--;
 		protocolCounts[protocol]--;
