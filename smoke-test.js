@@ -121,6 +121,22 @@ const server = fork('dist/index.js', [], {
 	check('BUGFIX signal carries the sender client for 3.2 desktops',
 		!!sig && !!sig.client && sig.client.clientId === 101 && sig.client.playerId === 1, JSON.stringify(sig && sig.client));
 
+	// --- OBS overlay: BetterCrewlink-obs joins a room named after the 9-char obsSecret and the
+	// desktop streams to it by room name, from inside its own lobby ---
+	const overlay = await connect();
+	overlay.emit('join', 'K3Z9Q2M7X', 7, 59001);
+	await once(overlay, 'setClients');
+	let bObs = 0;
+	b.on('signal', () => bObs++);
+	const obsFrame = once(overlay, 'signal');
+	a.emit('signal', { to: 'K3Z9Q2M7X', data: { overlayState: { gameState: 1 } } });
+	const obs = await obsFrame;
+	await wait(200);
+	check('BUGFIX desktop OBS feed reaches the overlay room', !!obs && !!obs.data.overlayState && obs.from === a.id,
+		JSON.stringify(obs));
+	check('OBS feed is not fanned out to the sender\'s lobby', bObs === 0, `b got ${bObs}`);
+	overlay.close();
+
 	// --- lobby browser: only the opener gets new_lobbies (the :334 fix) ---
 	const br1 = await connect();
 	const br2 = await connect();

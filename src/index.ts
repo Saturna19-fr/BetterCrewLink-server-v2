@@ -247,6 +247,9 @@ function isValidLobbyCode(c: unknown): c is string {
 
 const MOBILE_ROOM_SUFFIX = '_mobile';
 
+/** An OBS overlay room: the desktop's obsSecret, 9 chars of uppercase base36. */
+const OBS_ROOM = /^[0-9A-Z]{9}$/;
+
 /**
  * The second room a lobby spans. The mobile client discovers the desktop "Mobile
  * Host" in `<CODE>_mobile`, then re-joins the real lobby `<CODE>` for voice.
@@ -564,6 +567,7 @@ io.on('connection', (socket: IOSocket) => {
 				return;
 			} else {
 				callbackFn(1, 'Lobby is not public anymore');
+				return;
 			}
 		}
 		callbackFn(1, 'Lobby not found :C');
@@ -626,6 +630,21 @@ io.on('connection', (socket: IOSocket) => {
 		// it that throws as soon as the receiver knows 2+ other peers, the offer is lost,
 		// and nobody in a 3+ player lobby ever hears anyone. Older clients ignore it.
 		const client = clients.get(socket.id);
+
+		// The desktop's OBS overlay feed: BetterCrewlink-obs joins a room named after the
+		// 9-char obsSecret, and the desktop streams to it with `signal { to: obsSecret }` --
+		// a room name, from outside that room. Among Us codes are 4 or 6 characters and
+		// the reserved/mobile rooms are longer, so this shape only ever names an overlay,
+		// and reaching one needs its secret. Checked before the lobby guard so the final
+		// MENU frame still reaches the overlay after the desktop has left its lobby.
+		if (OBS_ROOM.test(to) && to !== code && !socket.rooms.has(to)) {
+			const size = roomSize(to);
+			if (size === 0) return;
+			socket.to(to).emit('signal', { data, from: socket.id });
+			countEmit('signal', size);
+			return;
+		}
+
 		// `to === code` closes the corner where a client joins a lobby named after
 		// somebody's socket id, since every socket also sits in a room named by its own id.
 		if (!code || to === code) return;
