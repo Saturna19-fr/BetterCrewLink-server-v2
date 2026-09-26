@@ -116,6 +116,10 @@ const server = fork('dist/index.js', [], {
 	a.emit('signal', { to: b.id, data: 'sdp-payload' });
 	const sig = await bSignal;
 	check('signal delivered to peer in same room', !!sig && sig.data === 'sdp-payload' && sig.from === a.id);
+	// Desktop 3.2 answers an offer with createPeerConnection(from, false, signal.client) and
+	// reads client.clientId; a missing `client` threw and killed voice in 3+ player lobbies.
+	check('BUGFIX signal carries the sender client for 3.2 desktops',
+		!!sig && !!sig.client && sig.client.clientId === 101 && sig.client.playerId === 1, JSON.stringify(sig && sig.client));
 
 	// --- lobby browser: only the opener gets new_lobbies (the :334 fix) ---
 	const br1 = await connect();

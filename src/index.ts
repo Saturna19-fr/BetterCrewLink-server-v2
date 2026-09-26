@@ -621,6 +621,11 @@ io.on('connection', (socket: IOSocket) => {
 			return;
 		}
 		const { to, data } = signal;
+		// Desktop 3.2+ reads `client` off every signal and dereferences it when an offer
+		// creates the answering peer (ConnectionController createPeerConnection). Without
+		// it that throws as soon as the receiver knows 2+ other peers, the offer is lost,
+		// and nobody in a 3+ player lobby ever hears anyone. Older clients ignore it.
+		const client = clients.get(socket.id);
 		// `to === code` closes the corner where a client joins a lobby named after
 		// somebody's socket id, since every socket also sits in a room named by its own id.
 		if (!code || to === code) return;
@@ -633,7 +638,7 @@ io.on('connection', (socket: IOSocket) => {
 		// the lobby code, so this grants no new reach -- unlike the old unvalidated `to`,
 		// which could name 'lobbybrowser' and fan a payload out to every browser client.
 		if (to === code + MOBILE_ROOM_SUFFIX && isValidLobbyCode(to)) {
-			socket.to(to).emit('signal', { data, from: socket.id });
+			socket.to(to).emit('signal', { data, from: socket.id, client });
 			countEmit('signal', roomSize(to) - (socket.rooms.has(to) ? 1 : 0));
 			return;
 		}
@@ -652,6 +657,7 @@ io.on('connection', (socket: IOSocket) => {
 		io.to(to).emit('signal', {
 			data,
 			from: socket.id,
+			client,
 		});
 		countEmit('signal', 1);
 	});
